@@ -1,10 +1,10 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import toast from "react-hot-toast"
-import { useAccount, useReadContract, useWriteContract, useWatchContractEvent } from "wagmi"
+import { useAccount, useChainId, useReadContract, useWriteContract, useWatchContractEvent } from "wagmi"
 import { ConnectButton } from "@rainbow-me/rainbowkit"
-import { RAFFLE_ABI, RAFFLE_CONTRACT_ADDRESS, ERC20_ABI, USDC_ADDRESS } from "../constants"
+import { RAFFLE_ABI, ERC20_ABI, getAddressesForChain } from "../constants"
 import { waitForTransactionReceipt } from "@wagmi/core"
 import { config } from "../App"
 import GameBoard from "./GameBoard"
@@ -14,18 +14,10 @@ import GameHistory from "./GameHistory"
 import AdminPanel from "./AdminPanel"
 import type { RaffleInfo, PlayerEntry, RaffleEvent } from "../types/game"
 
-const raffleContract = {
-  address: RAFFLE_CONTRACT_ADDRESS as `0x${string}`,
-  abi: RAFFLE_ABI,
-}
-
-const usdcContract = {
-  address: USDC_ADDRESS as `0x${string}`,
-  abi: ERC20_ABI,
-}
-
 const Container = () => {
   const { address, isConnected } = useAccount()
+  const chainId = useChainId()
+  const { raffle: raffleAddress, usdc: usdcAddress } = getAddressesForChain(chainId)
   const { writeContractAsync } = useWriteContract()
   const [isLoading, setIsLoading] = useState(false)
   const [isPickingWinner, setIsPickingWinner] = useState(false)
@@ -34,6 +26,22 @@ const Container = () => {
   const [isResetting, setIsResetting] = useState(false)
   const [gameEvents, setGameEvents] = useState<RaffleEvent[]>([])
   const [playerEntries, setPlayerEntries] = useState<PlayerEntry[]>([])
+
+  const raffleContract = useMemo(
+    () => ({
+      address: raffleAddress as `0x${string}`,
+      abi: RAFFLE_ABI,
+    }),
+    [raffleAddress],
+  )
+
+  const usdcContract = useMemo(
+    () => ({
+      address: usdcAddress as `0x${string}`,
+      abi: ERC20_ABI,
+    }),
+    [usdcAddress],
+  )
 
   // Read game open status
   const { data: gameOpenData, refetch: refetchGameOpen } = useReadContract({
@@ -92,7 +100,7 @@ const Container = () => {
     owner: ownerData ? (ownerData as string) : "",
   }
 
-  const isOwner = address && ownerData && address.toLowerCase() === (ownerData as string).toLowerCase()
+  const isOwner = Boolean(address && ownerData && address.toLowerCase() === (ownerData as string).toLowerCase())
 
   // Process player entries - count how many times each address appears
   useEffect(() => {
@@ -230,9 +238,11 @@ const Container = () => {
       console.log("Players added by admin:", logs)
       refetchAll()
 
-      for (const log of logs) {
-        const args = log.args as { players: `0x${string}`[]; admin: `0x${string}` }
-        const { players, admin } = args
+      const typedLogs = logs as Array<{ args?: { players: `0x${string}`[]; admin: `0x${string}` } }>
+
+      for (const { args } of typedLogs) {
+        if (!args) continue
+        const { players } = args
 
         const playerCount = players.length
 
@@ -261,9 +271,11 @@ const Container = () => {
     onLogs(logs) {
       console.log("Game reset:", logs)
 
-      for (const log of logs) {
-        const admin = log.args.admin as `0x${string}`
-        const timestamp = log.args.timestamp as bigint
+      const typedLogs = logs as Array<{ args?: { admin: `0x${string}`; timestamp: bigint } }>
+
+      for (const { args } of typedLogs) {
+        if (!args) continue
+        const { admin } = args
 
         toast.success(`Game has been reset by ${admin.slice(0, 6)}...${admin.slice(-4)}`, {
           style: {
@@ -430,7 +442,7 @@ const Container = () => {
       const approveResult = await writeContractAsync({
         ...usdcContract,
         functionName: "approve",
-        args: [RAFFLE_CONTRACT_ADDRESS, amountInDecimals],
+        args: [raffleAddress, amountInDecimals],
         account: address as `0x${string}`,
       })
 
