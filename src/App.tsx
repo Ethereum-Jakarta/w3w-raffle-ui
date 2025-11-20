@@ -16,27 +16,27 @@ import {
 import { Toaster } from "react-hot-toast";
 import Container from "./components/Container";
 
-// Konfigurasi Chain Monad Testnet
-const monadTestnet: Chain = {
-  id: 10143,
-  name: 'Monad Testnet',
+// Konfigurasi Chain Base Sepolia Testnet
+const baseSepolia: Chain = {
+  id: 84532,
+  name: 'Base Sepolia',
   nativeCurrency: {
     decimals: 18,
-    name: 'MON',
-    symbol: 'MON',
+    name: 'Ethereum',
+    symbol: 'ETH',
   },
   rpcUrls: {
     default: {
-      http: ['https://testnet-rpc.monad.xyz/'],
+      http: ['https://sepolia.base.org'],
     },
     public: {
-      http: ['https://testnet-rpc.monad.xyz/'],
+      http: ['https://sepolia.base.org'],
     },
   },
   blockExplorers: {
     default: {
-      name: 'MonadScan',
-      url: 'https://testnet.monadexplorer.com',
+      name: 'BaseScan',
+      url: 'https://sepolia.basescan.org',
     },
   },
   testnet: true,
@@ -44,9 +44,9 @@ const monadTestnet: Chain = {
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const config = getDefaultConfig({
-  appName: 'TugWar Game',
+  appName: 'Web3 Vibe Raffle',
   projectId: 'YOUR_WALLETCONNECT_PROJECT_ID', // Dapatkan dari https://cloud.walletconnect.com
-  chains: [monadTestnet],
+  chains: [baseSepolia],
   ssr: true,
 });
 

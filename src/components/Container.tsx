@@ -1,67 +1,74 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import toast from "react-hot-toast"
 import { useAccount, useReadContract, useWriteContract, useWatchContractEvent } from "wagmi"
 import { ConnectButton } from "@rainbow-me/rainbowkit"
-import { TUGWAR_ABI, TUGWAR_CONTRACT_ADDRESS } from "../constants"
+import { RAFFLE_ABI, RAFFLE_CONTRACT_ADDRESS, ERC20_ABI, USDC_ADDRESS } from "../constants"
 import { waitForTransactionReceipt } from "@wagmi/core"
 import { config } from "../App"
 import GameBoard from "./GameBoard"
 import GameControls from "./GameControls"
 import GameStats from "./GameStats"
 import GameHistory from "./GameHistory"
-import type { GameInfo, TeamStats, GamePrediction, GameEvent } from "../types/game"
+import AdminPanel from "./AdminPanel"
+import type { RaffleInfo, PlayerEntry, RaffleEvent } from "../types/game"
 
-const tugwarContract = {
-  address: TUGWAR_CONTRACT_ADDRESS as `0x${string}`,
-  abi: TUGWAR_ABI,
+const raffleContract = {
+  address: RAFFLE_CONTRACT_ADDRESS as `0x${string}`,
+  abi: RAFFLE_ABI,
+}
+
+const usdcContract = {
+  address: USDC_ADDRESS as `0x${string}`,
+  abi: ERC20_ABI,
 }
 
 const Container = () => {
   const { address, isConnected } = useAccount()
   const { writeContractAsync } = useWriteContract()
   const [isLoading, setIsLoading] = useState(false)
+  const [isPickingWinner, setIsPickingWinner] = useState(false)
+  const [isFundingPrize, setIsFundingPrize] = useState(false)
+  const [isAddingPlayer, setIsAddingPlayer] = useState(false)
   const [isResetting, setIsResetting] = useState(false)
-  const [isShaking, setIsShaking] = useState(false)
-  const [gameEvents, setGameEvents] = useState<GameEvent[]>([])
+  const [gameEvents, setGameEvents] = useState<RaffleEvent[]>([])
+  const [playerEntries, setPlayerEntries] = useState<PlayerEntry[]>([])
 
-  // Read game information
-  const { data: gameInfoData, refetch: refetchGameInfo } = useReadContract({
-    ...tugwarContract,
-    functionName: "getGameInfo",
+  // Read game open status
+  const { data: gameOpenData, refetch: refetchGameOpen } = useReadContract({
+    ...raffleContract,
+    functionName: "gameOpen",
     query: {
       enabled: isConnected,
       refetchInterval: 5000, // Refetch every 5 seconds
     },
   })
 
-  // Read team 1 stats
-  const { data: team1StatsData, refetch: refetchTeam1Stats } = useReadContract({
-    ...tugwarContract,
-    functionName: "getTeamStats",
-    args: [1],
+  // Read player count
+  const { data: playerCountData, refetch: refetchPlayerCount } = useReadContract({
+    ...raffleContract,
+    functionName: "getPlayerCount",
     query: {
       enabled: isConnected,
       refetchInterval: 5000,
     },
   })
 
-  // Read team 2 stats
-  const { data: team2StatsData, refetch: refetchTeam2Stats } = useReadContract({
-    ...tugwarContract,
-    functionName: "getTeamStats",
-    args: [2],
+  // Read prize pool
+  const { data: prizePoolData, refetch: refetchPrizePool } = useReadContract({
+    ...raffleContract,
+    functionName: "getPrizePool",
     query: {
       enabled: isConnected,
       refetchInterval: 5000,
     },
   })
 
-  // Read prediction
-  const { data: predictionData, refetch: refetchPrediction } = useReadContract({
-    ...tugwarContract,
-    functionName: "getPrediction",
+  // Read all players
+  const { data: playersData, refetch: refetchPlayers } = useReadContract({
+    ...raffleContract,
+    functionName: "getPlayers",
     query: {
       enabled: isConnected,
       refetchInterval: 5000,
@@ -70,94 +77,64 @@ const Container = () => {
 
   // Read owner
   const { data: ownerData } = useReadContract({
-    ...tugwarContract,
+    ...raffleContract,
     functionName: "owner",
     query: {
       enabled: isConnected,
     },
   })
 
-  // Process data with proper type assertions and checks
-  const gameInfo: GameInfo =
-    gameInfoData && Array.isArray(gameInfoData)
-      ? {
-          ropePosition: Number(gameInfoData[0]),
-          team1Score: Number(gameInfoData[1]),
-          team2Score: Number(gameInfoData[2]),
-          maxScoreDifference: Number(gameInfoData[3]),
-          winner: Number(gameInfoData[4]),
-          totalPulls: Number(gameInfoData[5]),
-          gamesPlayed: Number(gameInfoData[6]),
-        }
-      : {
-          ropePosition: 0,
-          team1Score: 0,
-          team2Score: 0,
-          maxScoreDifference: 5,
-          winner: 0,
-          totalPulls: 0,
-          gamesPlayed: 0,
-        }
-
-  const team1Stats: TeamStats =
-    team1StatsData && Array.isArray(team1StatsData)
-      ? {
-          score: Number(team1StatsData[0]),
-          isWinning: Boolean(team1StatsData[1]),
-          scoreAdvantage: Number(team1StatsData[2]),
-        }
-      : { score: 0, isWinning: false, scoreAdvantage: 0 }
-
-  const team2Stats: TeamStats =
-    team2StatsData && Array.isArray(team2StatsData)
-      ? {
-          score: Number(team2StatsData[0]),
-          isWinning: Boolean(team2StatsData[1]),
-          scoreAdvantage: Number(team2StatsData[2]),
-        }
-      : { score: 0, isWinning: false, scoreAdvantage: 0 }
-
-  const prediction: GamePrediction =
-    predictionData && Array.isArray(predictionData)
-      ? {
-          predictedWinner: Number(predictionData[0]),
-          confidence: Number(predictionData[1]),
-        }
-      : { predictedWinner: 0, confidence: 0 }
+  // Process raffle info
+  const raffleInfo: RaffleInfo = {
+    gameOpen: gameOpenData ? Boolean(gameOpenData) : true,
+    playerCount: playerCountData ? Number(playerCountData) : 0,
+    prizePool: prizePoolData ? BigInt(prizePoolData.toString()) : BigInt(0),
+    owner: ownerData ? (ownerData as string) : "",
+  }
 
   const isOwner = address && ownerData && address.toLowerCase() === (ownerData as string).toLowerCase()
 
-  // Watch for contract events
+  // Process player entries - count how many times each address appears
+  useEffect(() => {
+    if (playersData && Array.isArray(playersData)) {
+      const entryCounts = new Map<string, number>()
+
+      playersData.forEach((playerAddress: string) => {
+        const count = entryCounts.get(playerAddress) || 0
+        entryCounts.set(playerAddress, count + 1)
+      })
+
+      const entries: PlayerEntry[] = Array.from(entryCounts.entries()).map(([address, count]) => ({
+        address,
+        entryCount: count,
+      }))
+
+      setPlayerEntries(entries)
+    }
+  }, [playersData])
+
+  // Watch for PlayerJoined event
   useWatchContractEvent({
-    ...tugwarContract,
-    eventName: "PullExecuted",
+    ...raffleContract,
+    eventName: "PlayerJoined",
     onLogs(logs) {
-      console.log("Pull executed:", logs)
-      triggerShake()
+      console.log("Player joined:", logs)
       refetchAll()
 
-      // Add event to history
       const log = logs[0]
       if (log && "args" in log && log.args) {
-        const args = log.args as {
-          player: string
-          isTeam1: boolean
-          newRopePosition: number
-          team1Score: number
-          team2Score: number
-        }
+        const args = log.args as { player: string }
+        const { player } = args
 
-        const { player, isTeam1, team1Score, team2Score } = args
-        const newEvent: GameEvent = {
-          type: "pull",
+        const newEvent: RaffleEvent = {
+          type: "join",
           player: player,
-          team: isTeam1 ? 1 : 2,
           timestamp: Date.now(),
+          transactionHash: log.transactionHash ?? undefined,
         }
         setGameEvents((prev) => [...prev, newEvent])
 
-        // Show toast notification
-        toast.success(`${isTeam1 ? "Team 1" : "Team 2"} pulled! Score: ${team1Score} - ${team2Score}`, {
+        toast.success(`Player joined: ${player.slice(0, 6)}...${player.slice(-4)}`, {
           style: {
             background: "rgba(32, 0, 82, 0.95)",
             color: "#FBFAF9",
@@ -170,33 +147,32 @@ const Container = () => {
     },
   })
 
+  // Watch for WinnerPicked event
   useWatchContractEvent({
-    ...tugwarContract,
-    eventName: "GameWon",
+    ...raffleContract,
+    eventName: "WinnerPicked",
     onLogs(logs) {
-      console.log("Game won:", logs)
+      console.log("Winner picked:", logs)
       refetchAll()
 
-      // Add event to history
       const log = logs[0]
       if (log && "args" in log && log.args) {
-        const args = log.args as {
-          winningTeam: number
-          finalScore1: number
-          finalScore2: number
-        }
+        const args = log.args as { winner: string; prize: bigint }
+        const { winner, prize } = args
 
-        const { winningTeam, finalScore1, finalScore2 } = args
-        const newEvent: GameEvent = {
-          type: "win",
-          team: Number(winningTeam),
+        const newEvent: RaffleEvent = {
+          type: "winner",
+          winner: winner,
+          amount: prize,
           timestamp: Date.now(),
+          transactionHash: log.transactionHash ?? undefined,
         }
         setGameEvents((prev) => [...prev, newEvent])
 
-        // Show victory toast
-        toast.success(`🎉 Team ${winningTeam} Wins! Final Score: ${finalScore1} - ${finalScore2}`, {
-          duration: 5000,
+        const prizeInUSDC = Number(prize) / 1_000_000 // Convert from 6 decimals
+
+        toast.success(`🎉 Winner: ${winner.slice(0, 6)}...${winner.slice(-4)} won ${prizeInUSDC} USDC!`, {
+          duration: 8000,
           style: {
             background: "rgba(32, 0, 82, 0.95)",
             color: "#FBFAF9",
@@ -209,53 +185,119 @@ const Container = () => {
     },
   })
 
+  // Watch for PrizeFunded event
   useWatchContractEvent({
-    ...tugwarContract,
-    eventName: "GameReset",
+    ...raffleContract,
+    eventName: "PrizeFunded",
     onLogs(logs) {
-      console.log("Game reset:", logs)
+      console.log("Prize funded:", logs)
       refetchAll()
 
-      // Add event to history and clear previous events
-      const newEvent: GameEvent = {
-        type: "reset",
-        timestamp: Date.now(),
-      }
-      setGameEvents([newEvent]) // Reset history on game reset
+      const log = logs[0]
+      if (log && "args" in log && log.args) {
+        const args = log.args as { funder: string; amount: bigint }
+        const { funder, amount } = args
 
-      toast.success("Game has been reset!", {
-        style: {
-          background: "rgba(32, 0, 82, 0.95)",
-          color: "#FBFAF9",
-          border: "1px solid rgba(160, 5, 93, 0.3)",
-          borderRadius: "12px",
-          fontFamily: "Inter, sans-serif",
-        },
-      })
+        const newEvent: RaffleEvent = {
+          type: "funded",
+          player: funder,
+          amount: amount,
+          timestamp: Date.now(),
+          transactionHash: log.transactionHash ?? undefined,
+        }
+        setGameEvents((prev) => [...prev, newEvent])
+
+        const amountInUSDC = Number(amount) / 1_000_000
+
+        toast.success(`Prize funded: ${amountInUSDC} USDC added by ${funder.slice(0, 6)}...${funder.slice(-4)}`, {
+          style: {
+            background: "rgba(32, 0, 82, 0.95)",
+            color: "#FBFAF9",
+            border: "1px solid rgba(131, 110, 249, 0.3)",
+            borderRadius: "12px",
+            fontFamily: "Inter, sans-serif",
+          },
+        })
+      }
     },
   })
 
-  // Trigger rope shake animation
-  const triggerShake = () => {
-    setIsShaking(true)
-    setTimeout(() => setIsShaking(false), 400)
-  }
+  // Listen to PlayersAddedByAdmin events
+  useWatchContractEvent({
+    ...raffleContract,
+    eventName: "PlayersAddedByAdmin",
+    onLogs(logs) {
+      console.log("Players added by admin:", logs)
+      refetchAll()
+
+      for (const log of logs) {
+        const args = log.args as { players: `0x${string}`[]; admin: `0x${string}` }
+        const { players, admin } = args
+
+        const playerCount = players.length
+
+        toast.success(
+          playerCount === 1
+            ? `Admin added 1 player: ${players[0].slice(0, 6)}...${players[0].slice(-4)}`
+            : `Admin added ${playerCount} players to the raffle`,
+          {
+            style: {
+              background: "rgba(32, 0, 82, 0.95)",
+              color: "#FBFAF9",
+              border: "1px solid rgba(131, 110, 249, 0.3)",
+              borderRadius: "12px",
+              fontFamily: "Inter, sans-serif",
+            },
+          }
+        )
+      }
+    },
+  })
+
+  // Listen to GameReset events
+  useWatchContractEvent({
+    ...raffleContract,
+    eventName: "GameReset",
+    onLogs(logs) {
+      console.log("Game reset:", logs)
+
+      for (const log of logs) {
+        const admin = log.args.admin as `0x${string}`
+        const timestamp = log.args.timestamp as bigint
+
+        toast.success(`Game has been reset by ${admin.slice(0, 6)}...${admin.slice(-4)}`, {
+          style: {
+            background: "rgba(32, 0, 82, 0.95)",
+            color: "#FBFAF9",
+            border: "1px solid rgba(131, 110, 249, 0.3)",
+            borderRadius: "12px",
+            fontFamily: "Inter, sans-serif",
+          },
+        })
+      }
+
+      // Clear all data and refetch
+      setGameEvents([])
+      setPlayerEntries([])
+      refetchAll()
+    },
+  })
 
   // Refetch all data
   const refetchAll = () => {
-    refetchGameInfo()
-    refetchTeam1Stats()
-    refetchTeam2Stats()
-    refetchPrediction()
+    refetchGameOpen()
+    refetchPlayerCount()
+    refetchPrizePool()
+    refetchPlayers()
   }
 
-  // Handle pull action
-  const handlePull = async (isTeam1: boolean) => {
-    if (!isConnected || gameInfo.winner !== 0) return
+  // Handle join game
+  const handleJoinGame = async () => {
+    if (!isConnected || !raffleInfo.gameOpen) return
 
     setIsLoading(true)
 
-    toast.loading(`Team ${isTeam1 ? "1" : "2"} is pulling...`, {
+    toast.loading("Joining raffle...", {
       style: {
         background: "rgba(32, 0, 82, 0.95)",
         color: "#FBFAF9",
@@ -267,14 +309,13 @@ const Container = () => {
 
     try {
       const result = await writeContractAsync({
-        ...tugwarContract,
-        functionName: "pull",
-        args: [isTeam1],
+        ...raffleContract,
+        functionName: "joinGame",
         account: address as `0x${string}`,
       })
 
       toast.dismiss()
-      toast.loading("Confirming pull...", {
+      toast.loading("Confirming entry...", {
         style: {
           background: "rgba(32, 0, 82, 0.95)",
           color: "#FBFAF9",
@@ -288,13 +329,13 @@ const Container = () => {
         hash: result as `0x${string}`,
       })
 
-      console.log("Pull transaction confirmed:", resultTransaction)
+      console.log("Join transaction confirmed:", resultTransaction)
       toast.dismiss()
       // Success toast will be handled by event listener
     } catch (error) {
-      console.error("Pull failed:", error)
+      console.error("Join failed:", error)
       toast.dismiss()
-      toast.error("Pull failed. Please try again.", {
+      toast.error("Failed to join. Please try again.", {
         style: {
           background: "rgba(32, 0, 82, 0.95)",
           color: "#FBFAF9",
@@ -308,8 +349,283 @@ const Container = () => {
     }
   }
 
+  // Handle pick winner (owner only)
+  const handlePickWinner = async () => {
+    if (!isConnected || !isOwner) return
+
+    setIsPickingWinner(true)
+
+    toast.loading("Picking winner...", {
+      style: {
+        background: "rgba(32, 0, 82, 0.95)",
+        color: "#FBFAF9",
+        border: "1px solid rgba(131, 110, 249, 0.3)",
+        borderRadius: "12px",
+        fontFamily: "Inter, sans-serif",
+      },
+    })
+
+    try {
+      const result = await writeContractAsync({
+        ...raffleContract,
+        functionName: "pickWinner",
+        account: address as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.loading("Confirming winner selection...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: result as `0x${string}`,
+      })
+
+      toast.dismiss()
+      // Success toast will be handled by event listener
+    } catch (error) {
+      console.error("Pick winner failed:", error)
+      toast.dismiss()
+      toast.error("Failed to pick winner. Please try again.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } finally {
+      setIsPickingWinner(false)
+    }
+  }
+
+  // Handle fund prize (owner only)
+  const handleFundPrize = async (amount: number) => {
+    if (!isConnected || !isOwner) return
+
+    setIsFundingPrize(true)
+
+    try {
+      // Convert USDC amount to 6 decimals
+      const amountInDecimals = BigInt(Math.floor(amount * 1_000_000))
+
+      // Step 1: Approve USDC spending
+      toast.loading("Approving USDC...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      const approveResult = await writeContractAsync({
+        ...usdcContract,
+        functionName: "approve",
+        args: [RAFFLE_CONTRACT_ADDRESS, amountInDecimals],
+        account: address as `0x${string}`,
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: approveResult as `0x${string}`,
+      })
+
+      toast.dismiss()
+
+      // Step 2: Fund prize
+      toast.loading("Funding prize pool...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      const fundResult = await writeContractAsync({
+        ...raffleContract,
+        functionName: "fundPrize",
+        args: [BigInt(amount)], // Contract expects the amount without decimals (will convert internally)
+        account: address as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.loading("Confirming funding...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: fundResult as `0x${string}`,
+      })
+
+      toast.dismiss()
+      // Success toast will be handled by event listener
+    } catch (error) {
+      console.error("Fund prize failed:", error)
+      toast.dismiss()
+      toast.error("Failed to fund prize. Please try again.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } finally {
+      setIsFundingPrize(false)
+    }
+  }
+
+  // Handle add player (owner only)
+  const handleAddPlayer = async (playerAddress: string) => {
+    if (!isConnected || !isOwner) return
+
+    setIsAddingPlayer(true)
+
+    toast.loading("Adding player...", {
+      style: {
+        background: "rgba(32, 0, 82, 0.95)",
+        color: "#FBFAF9",
+        border: "1px solid rgba(131, 110, 249, 0.3)",
+        borderRadius: "12px",
+        fontFamily: "Inter, sans-serif",
+      },
+    })
+
+    try {
+      const result = await writeContractAsync({
+        ...raffleContract,
+        functionName: "addPlayer",
+        args: [playerAddress as `0x${string}`],
+        account: address as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.loading("Confirming player addition...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: result as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.success(`Player ${playerAddress.slice(0, 6)}...${playerAddress.slice(-4)} added successfully!`, {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } catch (error) {
+      console.error("Add player failed:", error)
+      toast.dismiss()
+      toast.error("Failed to add player. Please try again.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } finally {
+      setIsAddingPlayer(false)
+    }
+  }
+
+  // Handle batch add players (owner only)
+  const handleAddPlayersBatch = async (addresses: string[]) => {
+    if (!isConnected || !isOwner) return
+
+    setIsAddingPlayer(true)
+
+    toast.loading(`Adding ${addresses.length} players...`, {
+      style: {
+        background: "rgba(32, 0, 82, 0.95)",
+        color: "#FBFAF9",
+        border: "1px solid rgba(131, 110, 249, 0.3)",
+        borderRadius: "12px",
+        fontFamily: "Inter, sans-serif",
+      },
+    })
+
+    try {
+      const result = await writeContractAsync({
+        ...raffleContract,
+        functionName: "addPlayersBatch",
+        args: [addresses as `0x${string}`[]],
+        account: address as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.loading("Confirming batch addition...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: result as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.success(`${addresses.length} players added successfully!`, {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } catch (error) {
+      console.error("Batch add players failed:", error)
+      toast.dismiss()
+      toast.error("Failed to add players. Please try again.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } finally {
+      setIsAddingPlayer(false)
+    }
+  }
+
   // Handle reset game (owner only)
-  const handleReset = async () => {
+  const handleResetGame = async () => {
     if (!isConnected || !isOwner) return
 
     setIsResetting(true)
@@ -326,9 +642,8 @@ const Container = () => {
 
     try {
       const result = await writeContractAsync({
-        ...tugwarContract,
-        functionName: "reSet",
-        args: [5], // Reset with default max score difference of 5
+        ...raffleContract,
+        functionName: "resetGame",
         account: address as `0x${string}`,
       })
 
@@ -348,11 +663,91 @@ const Container = () => {
       })
 
       toast.dismiss()
-      // Success toast will be handled by event listener
+      toast.success("Game reset successfully! Ready for new round.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(131, 110, 249, 0.3)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
     } catch (error) {
-      console.error("Reset failed:", error)
+      console.error("Reset game failed:", error)
       toast.dismiss()
-      toast.error("Reset failed. Please try again.", {
+      toast.error("Failed to reset game. Please try again.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } finally {
+      setIsResetting(false)
+    }
+  }
+
+  // Handle emergency reset (owner only)
+  const handleEmergencyReset = async () => {
+    if (!isConnected || !isOwner) return
+
+    // Add confirmation dialog
+    const confirmed = window.confirm(
+      "⚠️ EMERGENCY RESET\n\nThis will cancel the current game and reset all players.\nAre you sure you want to continue?"
+    )
+
+    if (!confirmed) return
+
+    setIsResetting(true)
+
+    toast.loading("Emergency reset in progress...", {
+      style: {
+        background: "rgba(32, 0, 82, 0.95)",
+        color: "#FBFAF9",
+        border: "1px solid rgba(160, 5, 93, 0.5)",
+        borderRadius: "12px",
+        fontFamily: "Inter, sans-serif",
+      },
+    })
+
+    try {
+      const result = await writeContractAsync({
+        ...raffleContract,
+        functionName: "emergencyReset",
+        account: address as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.loading("Confirming emergency reset...", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(160, 5, 93, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+
+      await waitForTransactionReceipt(config, {
+        hash: result as `0x${string}`,
+      })
+
+      toast.dismiss()
+      toast.success("Emergency reset complete. Game restarted.", {
+        style: {
+          background: "rgba(32, 0, 82, 0.95)",
+          color: "#FBFAF9",
+          border: "1px solid rgba(251, 204, 22, 0.5)",
+          borderRadius: "12px",
+          fontFamily: "Inter, sans-serif",
+        },
+      })
+    } catch (error) {
+      console.error("Emergency reset failed:", error)
+      toast.dismiss()
+      toast.error("Emergency reset failed. Please try again.", {
         style: {
           background: "rgba(32, 0, 82, 0.95)",
           color: "#FBFAF9",
@@ -371,23 +766,36 @@ const Container = () => {
       <div className="container mx-auto px-6 max-w-7xl">
         {isConnected ? (
           <div className="space-y-8">
-            <GameBoard gameInfo={gameInfo} isShaking={isShaking} />
+            <GameBoard raffleInfo={raffleInfo} />
             <GameControls
-              onPull={handlePull}
+              onJoinGame={handleJoinGame}
               isConnected={isConnected}
-              winner={gameInfo.winner}
+              gameOpen={raffleInfo.gameOpen}
               isLoading={isLoading}
             />
             <GameStats
-              gameInfo={gameInfo}
-              team1Stats={team1Stats}
-              team2Stats={team2Stats}
-              prediction={prediction}
+              raffleInfo={raffleInfo}
+              playerEntries={playerEntries}
               isOwner={Boolean(isOwner)}
-              onReset={handleReset}
-              isResetting={isResetting}
+              onPickWinner={handlePickWinner}
+              isPickingWinner={isPickingWinner}
             />
-            <GameHistory events={gameEvents} />
+            <GameHistory events={gameEvents} playerEntries={playerEntries} />
+            {isOwner && (
+              <AdminPanel
+                raffleInfo={raffleInfo}
+                onPickWinner={handlePickWinner}
+                onFundPrize={handleFundPrize}
+                onAddPlayer={handleAddPlayer}
+                onAddPlayersBatch={handleAddPlayersBatch}
+                onResetGame={handleResetGame}
+                onEmergencyReset={handleEmergencyReset}
+                isPickingWinner={isPickingWinner}
+                isFundingPrize={isFundingPrize}
+                isAddingPlayer={isAddingPlayer}
+                isResetting={isResetting}
+              />
+            )}
           </div>
         ) : (
           <div className="relative min-h-screen overflow-hidden particle-bg">
@@ -396,11 +804,11 @@ const Container = () => {
             <div className="absolute top-20 left-20 w-72 h-72 bg-yellow-400/10 rounded-full blur-3xl float-slow"></div>
             <div className="absolute bottom-20 right-20 w-96 h-96 bg-purple-600/10 rounded-full blur-3xl float-medium"></div>
             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-gradient-radial from-yellow-400/5 to-transparent rounded-full"></div>
-            
+
             {/* Live Badge */}
             <div className="absolute top-8 left-8 z-20 float-fast">
               <div className="live-badge sparkle">
-                🔥&nbsp;&nbsp;MONAD TESTNET LIVE!
+                🔥&nbsp;&nbsp;BASE SEPOLIA LIVE!
               </div>
             </div>
 
@@ -409,16 +817,16 @@ const Container = () => {
               <div className="text-center max-w-5xl mx-auto px-8 py-20">
               {/* Main Title */}
               <h1 className="hero-title text-gradient-primary mb-6 fade-in-up">
-                <span className="block sm:inline">PULL.&nbsp;BATTLE.</span>
+                <span className="block sm:inline">JOIN.&nbsp;PLAY.</span>
                 <span className="block sm:inline">&nbsp;WIN.</span>
                 <br />
-                <span className="text-white text-reveal">TUGWAR.</span>
+                <span className="text-white text-reveal">WEB3 VIBE RAFFLE.</span>
               </h1>
-              
+
               {/* Subtitle */}
               <p className="hero-subtitle text-gray-300 mb-12 max-w-3xl mx-auto fade-in-up-delay-1">
-                The ultimate blockchain tug of war battle on Monad testnet. 
-                Choose your side, pull the rope, and claim victory in the most epic Web3 gaming experience.
+                The ultimate blockchain raffle game on Base Sepolia testnet.
+                Join for free, multiply your chances, and win USDC prizes in the most exciting Web3 raffle experience.
               </p>
 
               {/* CTA Buttons */}
@@ -442,18 +850,18 @@ const Container = () => {
                         {(() => {
                           if (!connected) {
                             return (
-                              <button 
-                                onClick={openConnectModal} 
+                              <button
+                                onClick={openConnectModal}
                                 className="btn-w3gg btn-primary-w3gg btn-magnetic text-lg px-8 py-4 sparkle"
                               >
-                                Connect Wallet & Play Now
+                                Connect Wallet & Join Raffle
                               </button>
                             );
                           }
 
                           return (
-                            <button 
-                              onClick={openAccountModal} 
+                            <button
+                              onClick={openAccountModal}
                               className="btn-w3gg btn-primary-w3gg btn-magnetic text-lg px-8 py-4 sparkle"
                             >
                               {account.displayName}
@@ -464,9 +872,9 @@ const Container = () => {
                     );
                   }}
                 </ConnectButton.Custom>
-                <a 
-                  href="https://discord.com/invite/yrWQeS8GBa" 
-                  target="_blank" 
+                <a
+                  href="https://discord.gg/mFQDxfnJRZ"
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="btn-w3gg btn-secondary-w3gg interactive-hover text-lg px-8 py-4"
                 >
@@ -476,50 +884,58 @@ const Container = () => {
 
               {/* Features Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mt-20">
-                {/* Play to Earn */}
+                {/* Free to Play */}
                 <div className="glass-card p-8 text-center glow-hover fade-in-up-delay-1">
-                  <div className="text-5xl mb-4 float-fast">⚡</div>
-                  <h3 className="text-xl font-bold text-gradient-primary mb-3">PLAY TO EARN</h3>
+                  <div className="text-5xl mb-4 float-fast">🎫</div>
+                  <h3 className="text-xl font-bold text-gradient-primary mb-3">FREE TO PLAY</h3>
                   <p className="text-gray-400 text-sm leading-relaxed">
-                    Pull the rope, win battles, and earn rewards on the blockchain. Every move counts in this epic struggle.
+                    Join the raffle for free! No entry fee required. The more you join, the higher your chances to win.
                   </p>
                 </div>
 
-                {/* Biggest Web3 Gaming */}
+                {/* Win USDC */}
                 <div className="glass-card p-8 text-center glow-hover fade-in-up-delay-2">
-                  <div className="text-5xl mb-4 float-medium">🏆</div>
-                  <h3 className="text-xl font-bold text-gradient-primary mb-3">EPIC BATTLES</h3>
+                  <div className="text-5xl mb-4 float-medium">💰</div>
+                  <h3 className="text-xl font-bold text-gradient-primary mb-3">WIN USDC</h3>
                   <p className="text-gray-400 text-sm leading-relaxed">
-                    Join the most intense blockchain gaming experience. Team up and dominate the competition.
+                    Real USDC prizes automatically sent to winners via smart contract. Instant, trustless, and transparent.
                   </p>
                 </div>
 
-                {/* Monad Powered */}
+                {/* Base Powered */}
                 <div className="glass-card p-8 text-center glow-hover fade-in-up-delay-3">
                   <div className="text-5xl mb-4 float-slow">🚀</div>
-                  <h3 className="text-xl font-bold text-gradient-primary mb-3">MONAD POWERED</h3>
+                  <h3 className="text-xl font-bold text-gradient-primary mb-3">BASE POWERED</h3>
                   <p className="text-gray-400 text-sm leading-relaxed">
-                    Built on Monad testnet for lightning-fast transactions and seamless gaming experience.
+                    Built on Base Sepolia for lightning-fast transactions and low gas fees. The future of Web3 gaming.
                   </p>
                 </div>
               </div>
 
-              {/* Team Selection Preview */}
+              {/* How It Works */}
               <div className="mt-16 fade-in-up-delay-3">
-                <h3 className="text-2xl font-bold mb-8 text-gradient-primary">CHOOSE YOUR SIDE</h3>
-                <div className="flex justify-center items-center space-x-12">
-                  <div className="gradient-border glass-card p-6 scale-hover interactive-hover cursor-pointer border-2 border-blue-500/30 hover:border-blue-400 sparkle">
-                    <div className="text-4xl mb-3 float-medium">🔵</div>
-                    <div className="text-blue-400 font-bold text-lg">TEAM BLUE</div>
-                    <div className="text-sm text-gray-400 mt-2">The Strategists</div>
+                <h3 className="text-2xl font-bold mb-8 text-gradient-primary">HOW IT WORKS</h3>
+                <div className="flex justify-center items-center space-x-8 flex-wrap gap-4">
+                  <div className="gradient-border glass-card p-6 scale-hover interactive-hover border-2 border-purple-500/30 hover:border-purple-400 sparkle max-w-xs">
+                    <div className="text-4xl mb-3 float-medium">1️⃣</div>
+                    <div className="text-purple-400 font-bold text-lg">CONNECT</div>
+                    <div className="text-sm text-gray-400 mt-2">Connect your wallet to Base Sepolia</div>
                   </div>
-                  
-                  <div className="text-3xl font-bold text-gradient-primary animate-pulse float-fast">VS</div>
-                  
-                  <div className="gradient-border glass-card p-6 scale-hover interactive-hover cursor-pointer border-2 border-red-500/30 hover:border-red-400 sparkle">
-                    <div className="text-4xl mb-3 float-medium">🔴</div>
-                    <div className="text-red-400 font-bold text-lg">TEAM RED</div>
-                    <div className="text-sm text-gray-400 mt-2">The Warriors</div>
+
+                  <div className="text-2xl font-bold text-gradient-primary">→</div>
+
+                  <div className="gradient-border glass-card p-6 scale-hover interactive-hover border-2 border-blue-500/30 hover:border-blue-400 sparkle max-w-xs">
+                    <div className="text-4xl mb-3 float-medium">2️⃣</div>
+                    <div className="text-blue-400 font-bold text-lg">JOIN</div>
+                    <div className="text-sm text-gray-400 mt-2">Join as many times as you want (more entries = higher chance)</div>
+                  </div>
+
+                  <div className="text-2xl font-bold text-gradient-primary">→</div>
+
+                  <div className="gradient-border glass-card p-6 scale-hover interactive-hover border-2 border-yellow-500/30 hover:border-yellow-400 sparkle max-w-xs">
+                    <div className="text-4xl mb-3 float-medium">3️⃣</div>
+                    <div className="text-yellow-400 font-bold text-lg">WIN!</div>
+                    <div className="text-sm text-gray-400 mt-2">Smart contract picks winner & sends USDC automatically</div>
                   </div>
                 </div>
               </div>
